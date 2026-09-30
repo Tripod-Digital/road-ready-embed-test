@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Road Ready embed test host</title>
+<style>
+  :root { --ink: #1d1d1b; --muted: #6b6a64; --line: #d9d6cc; --bg: #fbfaf6; --accent: #2d3a8c; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--ink); background: var(--bg); }
+  header { background: var(--accent); color: #fff; padding: 14px 20px; }
+  header h1 { margin: 0; font-size: 18px; }
+  header p { margin: 4px 0 0; font-size: 13px; opacity: .85; }
+  main { display: grid; gap: 20px; padding: 20px; grid-template-columns: minmax(0, 1fr) 400px; max-width: 1200px; margin: 0 auto; }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } #frame-col { order: -1; } }
+  section.card { border: 1px solid var(--line); background: #fff; padding: 16px; margin-bottom: 16px; }
+  h2 { margin: 0 0 10px; font-size: 15px; text-transform: uppercase; letter-spacing: .04em; }
+  label { display: block; font-size: 13px; margin: 8px 0 2px; }
+  input, select { font: inherit; padding: 6px 8px; border: 1px solid var(--line); width: 100%; max-width: 320px; }
+  input[type=checkbox] { width: auto; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  button { font: inherit; padding: 7px 14px; border: 1px solid var(--ink); background: var(--ink); color: #fff; cursor: pointer; }
+  button.secondary { background: #fff; color: var(--ink); }
+  button:disabled { opacity: .4; cursor: default; }
+  #code { font: 600 20px ui-monospace, monospace; letter-spacing: .15em; max-width: 160px; }
+  #status { margin: 10px 0 0; font-size: 14px; }
+  #log { font: 12px/1.5 ui-monospace, monospace; list-style: none; padding: 0; margin: 0; max-height: 320px; overflow: auto; }
+  #log li { word-break: break-all; padding: 2px 0; border-bottom: 1px dotted var(--line); }
+  .in { color: #1b56b3; } .out { color: #1c7a35; } .note { color: var(--muted); }
+  pre { background: #f2f0ea; padding: 10px; overflow: auto; font-size: 12px; }
+  iframe { width: 100%; height: 680px; border: 1px solid var(--line); background: #111; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Road Ready embed test host</h1>
+  <p>Plays a partner booking page on a different site (GitHub Pages) to test the embedded guide end to end. Not a real booking page.</p>
+</header>
+<main>
+  <div>
+    <section class="card">
+      <h2>Booking</h2>
+      <label for="ref">Booking reference (sent as <code>ref</code>)</label>
+      <input id="ref" value="BK-1042" maxlength="128">
+      <label for="code">Road Ready booking code</label>
+      <div class="row">
+        <input id="code" readonly placeholder="------">
+        <button id="confirm" class="secondary" disabled>Confirm receipt</button>
+      </div>
+      <p id="status">Waiting for the traveller to finish the guide.</p>
+    </section>
+
+    <section class="card">
+      <h2>Settings</h2>
+      <label for="guide">Guide origin</label>
+      <select id="guide">
+        <option value="https://staging.roadreadynz.com">https://staging.roadreadynz.com</option>
+        <option value="https://roadreadynz.com">https://roadreadynz.com</option>
+      </select>
+      <label for="agency">Agency code</label>
+      <input id="agency" value="REN4">
+      <label for="lang">Language (<code>lang</code>)</label>
+      <input id="lang" value="en">
+      <label class="row" style="margin-top:10px"><input type="checkbox" id="auto" checked> Confirm receipt automatically</label>
+      <div class="row" style="margin-top:10px"><button id="load">Load guide</button></div>
+      <p class="note">Settings are also read from the URL: <code>?guide=&amp;agency=&amp;lang=&amp;ref=&amp;auto=0</code>.</p>
+    </section>
+
+    <section class="card">
+      <h2>Verify the code</h2>
+      <p class="note">A static page holds no key. Verify from a terminal with a partner key of the agency:</p>
+      <pre id="curl"></pre>
+    </section>
+
+    <section class="card">
+      <h2>Messages</h2>
+      <ul id="log"><li class="note">No messages yet.</li></ul>
+    </section>
+  </div>
+  <div id="frame-col">
+    <iframe id="rr" title="Road Ready NZ guide" allow="fullscreen; clipboard-write"></iframe>
+  </div>
+</main>
+<script>
+  // Host side of the embed contract: docs/partner-api-guide.md, "Embed the guide"
+  // (road-ready-nz-web, issue #159). Deliberately plain, like a partner would write it.
+  const $ = (id) => document.getElementById(id);
+  const frame = $("rr");
+  const params = new URLSearchParams(location.search);
+  // Another guide origin (a local server, say) gets its own entry in the list.
+  const guideParam = params.get("guide");
+  if (guideParam && ![...$("guide").options].some((o) => o.value === guideParam)) {
+    $("guide").add(new Option(guideParam, guideParam));
+  }
+  for (const key of ["guide", "agency", "lang", "ref"]) if (params.get(key)) $(key).value = params.get(key);
+  if (params.get("auto") === "0") $("auto").checked = false;
+
+  let origin = "";
+  let pending = "";
+
+  function log(kind, data) {
+    const list = $("log");
+    if (list.firstElementChild?.classList.contains("note")) list.textContent = "";
+    const item = document.createElement("li");
+    const time = new Date().toLocaleTimeString("en-NZ", { hour12: false });
+    const label = kind === "in" ? "guide → page" : kind === "out" ? "page → guide" : "note";
+    item.innerHTML = `<span class="note">${time}</span> <span class="${kind}">${label}</span> `;
+    item.append(typeof data === "string" ? data : JSON.stringify(data));
+    list.prepend(item);
+  }
+
+  function send(message) {
+    // Always the guide's origin as target, never "*".
+    frame.contentWindow.postMessage(message, origin);
+    log("out", message);
+  }
+
+  function confirmCode(code) {
+    send({ type: "roadready:received", code });
+    $("confirm").disabled = true;
+    $("status").textContent = "Code received and confirmed: the guide shows Done.";
+  }
+
+  function load() {
+    origin = $("guide").value;
+    pending = "";
+    $("code").value = "";
+    $("confirm").disabled = true;
+    $("status").textContent = "Waiting for the traveller to finish the guide.";
+    const url = `${origin}/embed/${encodeURIComponent($("agency").value.trim())}?lang=${encodeURIComponent($("lang").value.trim())}`;
+    frame.src = url;
+    log("note", `loading ${url} from ${location.origin}`);
+    $("curl").textContent =
+      `curl -X POST "${origin}/api/partner/booking-codes/verify" \\\n` +
+      `  -H "Authorization: ApiKey $ROAD_READY_KEY" -H "Content-Type: application/json" \\\n` +
+      `  -d '{ "code": "<code>", "companyId": "${$("agency").value.trim()}" }'`;
+  }
+
+  window.addEventListener("message", (event) => {
+    // Only the guide's frame, from the guide's origin.
+    if (event.origin !== origin || event.source !== frame.contentWindow) return;
+    const message = event.data || {};
+    log("in", message);
+
+    if (message.type === "roadready:ready") {
+      send({ type: "roadready:hello", ref: $("ref").value });
+    }
+    if (message.type === "roadready:completed" && typeof message.code === "string") {
+      pending = message.code;
+      $("code").value = message.code;
+      $("curl").textContent = $("curl").textContent.replace(/"code": "[^"]*"/, `"code": "${message.code}"`);
+      if ($("auto").checked) {
+        confirmCode(message.code);
+      } else {
+        $("confirm").disabled = false;
+        $("status").textContent = "Code received, not confirmed: after 5 seconds the guide shows the traveller their code.";
+      }
+    }
+  });
+
+  $("confirm").addEventListener("click", () => pending && confirmCode(pending));
+  $("load").addEventListener("click", load);
+  load();
+</script>
+</body>
+</html>
